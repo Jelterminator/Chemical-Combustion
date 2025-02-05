@@ -13,3 +13,5 @@ Third added a variable T to the 1 step mechanism: 1 step variable T.ipynb
 Next I wrote a library of functions for using the Chemkin Thermdat database to compute some thermodynamic factors: Chemkin.ipynb
 
 Then I added these two the 1 step and 4 step mechanisms: 1 step thermodynamics.ipynb & 4 step thermodynamics.ipynb
+
+In skeletal reaction model I am trying to load .yaml files with chemical data for very large reaction mechanisms, tens of species and hundreds of reactions, but the integrator struggles.
