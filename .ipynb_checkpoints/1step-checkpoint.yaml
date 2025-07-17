@@ -122,6 +122,6 @@ species:
 
 reactions:
 - equation: 'CH4 + 2 O2 => CO2 + 2 H2O '
-  rate-constant: {A: 3.478505e+08, b: 0.0, Ea: 2.0e+04 cal/mol}
+  rate-constant: {A: 3.478505e+08, b: 0.0, Ea: 2.0e+04}
   orders:
     O2: 0.5

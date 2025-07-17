@@ -659,28 +659,32 @@ Computes the reaction rates for all reactions given the current state.
 function compute_reaction_rates!(
     r::AbstractVector{<:Real},
     X::AbstractVector{<:Real},
-    kinetics_data::SplitKinetics, # Now accepts the new struct
+    kinetics_data::SplitKinetics,
     species_list::Vector{Species}
 )
     T = X[1]
     concentrations_m3 = @view X[2:end]
-    concentrations_cm3 = concentrations_m3 
-
-    # --- Loop 1: Elementary Reactions (FULLY TYPE-STABLE) ---
-    # The compiler knows `k` is ALWAYS an ElementaryKinetics object in this loop.
+    concentrations_cm3 = concentrations_m3 * 1e-6
+    
+    # Initialize all reaction rates to zero
+    fill!(r, 0.0)
+    
+    # --- Loop 1: Elementary Reactions ---
     for i in eachindex(kinetics_data.elementary_kinetics)
         k = kinetics_data.elementary_kinetics[i]
         original_idx = kinetics_data.elementary_indices[i]
-        r[original_idx] = calculate_q_dot(k, T, concentrations_cm3, species_list) 
+        
+        r[original_idx] = calculate_q_dot(k, T, concentrations_cm3, species_list) * 1e6
     end
     
-    # --- Loop 2: Falloff Reactions (FULLY TYPE-STABLE) ---
-    # The compiler knows `k` is ALWAYS a FalloffKinetics object in this loop.
+    # --- Loop 2: Falloff Reactions ---
     for i in eachindex(kinetics_data.falloff_kinetics)
         k = kinetics_data.falloff_kinetics[i]
         original_idx = kinetics_data.falloff_indices[i]
-        r[original_idx] = calculate_q_dot(k, T, concentrations_cm3, species_list) 
+        
+        r[original_idx] = calculate_q_dot(k, T, concentrations_cm3, species_list) * 1e6
     end
+    
     return nothing
 end
 
@@ -708,7 +712,7 @@ function calculate_third_body_M(efficiencies::Vector{Tuple{Int, Float64}}, C::Ab
 end
 
 # Dispatched helper for Troe blending factor F. This is for the Troe case.
-function get_blending_factor_F(params::TroeParameters, T::Float64, Pr::Float64)
+function get_blending_factor_F(params::TroeParameters, T::Real, Pr::Real)
     # Unpack to ensure compiler sees variables
     troe_alpha, T3, T1, T2 = params.A, params.T3, params.T1, params.T2
     
@@ -751,26 +755,26 @@ function calculate_q_dot(kinetics::ElementaryKinetics, T::Real, C::AbstractVecto
         k_f *= M
     end
 
-    # Reactant concentration product
-    C_reactants = 1.0
+    # Reactant concentrations in log space
+    C_reactants = 0
     for i in 1:length(kinetics.reactant_indices)
-        C_reactants *= C[kinetics.reactant_indices[i]] ^ kinetics.reactant_stoich[i]
+        C_reactants += log(C[kinetics.reactant_indices[i]]) * kinetics.reactant_stoich[i]
     end
     
-    r_fwd = k_f * C_reactants
+    r_fwd = k_f * exp(C_reactants)
     
     if kinetics.is_reversible
-        # Compute reverse rate
-        C_products = 1.0
+        # Compute reverse rate in log space
+        C_products = 0.0
         for i in 1:length(kinetics.product_indices)
-            C_products *= C[kinetics.product_indices[i]] ^ kinetics.product_stoich[i]
+            C_products += log(C[kinetics.product_indices[i]]) * kinetics.product_stoich[i]
         end
         
         delta_G = compute_reaction_delta_G(T, kinetics, species)
         # Avoid division by zero if k_f is tiny
         K_c = exp(-delta_G / (R_joule * T))
         k_rev = k_f / K_c 
-        r_rev = k_rev * C_products
+        r_rev = k_rev * exp(C_products)
         return r_fwd - r_rev
     else
         return r_fwd
@@ -790,25 +794,31 @@ function calculate_q_dot(kinetics::FalloffKinetics, T::Real, C::AbstractVector{<
     # Get blending factor F by dispatching on the type of troe_params
     F = get_blending_factor_F(kinetics.troe_params, T, Pr)
     
-    k_f = k_inf * (Pr / (1.0 + Pr)) * F
+    k_f = k_inf * (1 / (1.0 + Pr)) * F
     
     # --- The rest is identical to the ElementaryKinetics method ---
-    C_reactants = 1.0
+    
+    # Reactant concentrations in log space
+    C_reactants = 0
     for i in 1:length(kinetics.reactant_indices)
-        C_reactants *= C[kinetics.reactant_indices[i]] ^ kinetics.reactant_stoich[i]
+        C_reactants += log(C[kinetics.reactant_indices[i]]) * kinetics.reactant_stoich[i]
     end
-    r_fwd = k_f * C_reactants
+    
+    r_fwd = k_f * exp(C_reactants)
     
     if kinetics.is_reversible
-        C_products = 1.0
+        # Compute reverse rate in log space
+        C_products = 0.0
         for i in 1:length(kinetics.product_indices)
-            C_products *= C[kinetics.product_indices[i]] ^ kinetics.product_stoich[i]
+            C_products += log(C[kinetics.product_indices[i]]) * kinetics.product_stoich[i]
         end
-
+        
         delta_G = compute_reaction_delta_G(T, kinetics, species)
+        
         K_c = exp(-delta_G / (R_joule * T))
-        k_rev = k_f / K_c
-        r_rev = k_rev * C_products
+        
+        k_rev = k_f / K_c 
+        r_rev = k_rev * exp(C_products)
         return r_fwd - r_rev
     else
         return r_fwd
@@ -888,11 +898,7 @@ function initialize_concentrations(
     # Define standard air composition percentages (by mole fraction)
     air_composition = Dict(
         "N2"   => 0.78084,
-        "O2"   => 0.20946,
-        "AR"   => 0.00934,
-        "CO2"  => 0.000412,
-        "H2O"  => 0.002,
-        "CO"   => 0.000002
+        "O2"   => 0.20946
         # Add more components if necessary
     )
 
