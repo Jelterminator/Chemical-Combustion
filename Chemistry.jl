@@ -664,6 +664,8 @@ function compute_reaction_rates!(
 )
     T = X[1]
     concentrations_m3 = @view X[2:end]
+    # Convert to /cm3 for Arrhenius equation
+    # Also use a zero-is-zero clamp to prevent negative concentrations (see thesis paper)
     concentrations_cm3 = concentrations_m3 * 1e-6
     
     # Initialize all reaction rates to zero
