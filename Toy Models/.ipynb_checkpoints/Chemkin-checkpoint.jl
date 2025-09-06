@@ -65,7 +65,6 @@ function species_cp(T, data_for_a_species)
     Cp_R = a[1] + a[2]*T + a[3]*T^2 + a[4]*T^3 + a[5]*T^4
     # Convert to Cp in J/(mol·K)
     Cp_cal = Cp_R * R_cal
-
     Cp = Cp_cal * cal_to_J
     return Cp # J/mol/K
 end
@@ -85,7 +84,6 @@ function h0(T, data_for_a_species)
     H_RT = a[1] + a[2]*T/2 + a[3]*(T^2)/3 + a[4]*(T^3)/4 + a[5]*(T^4)/5 + a[6]/T
     # Convert to H in cal/mole
     H_cal = H_RT * R_cal * T
-
     H = H_cal * cal_to_J
     return H # J/mol
 end
