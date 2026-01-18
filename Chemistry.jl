@@ -53,8 +53,10 @@ end
 #
 # Modified later because of AD type compatibility needs
 #
+# Modified again to add transport data processing for later k and D computation
+#
 # Author: J.S. van der Heide
-# Date: 11-7-2025
+# Date: 19-8-2025
 ###############################################################################
 
 # Assuming 'mechanism_data' variable contains the loaded YAML data from the
@@ -102,6 +104,17 @@ struct ThermoData
 end
 
 """
+    TransData(M::Float64, d::Float64, eps::Float64)
+
+Represents transport data using NASA polynomials for a species. 
+"""
+struct TransData
+    M::Float64                  # Molar mass
+    d::Float64                  # Lennard-Jones diameter (Å)
+    eps::Float64                # Lennard-Jones well depth (K)
+end
+
+"""
     Species(name::String, composition::Dict{String, Int}, thermo::ThermoData)
 
 Represents a chemical species with its name, atomic composition, and thermodynamic data. (Unchanged)
@@ -110,6 +123,7 @@ struct Species
     name::String                   # Species name (e.g., "CH4")
     composition::Dict{String, Int} # Atomic composition (e.g., Dict("C" => 1, "H" => 4))
     thermo::ThermoData             # Thermodynamic data (NASA polynomials)
+    trans::TransData               # Transport data
 end
 
 """
@@ -173,7 +187,9 @@ function process_chemical_data(mechanism_data::Dict)
         composition_data = get(species_data, "composition", Dict{String, Int}())
         composition = Dict{String, Int}(String(k) => Int(v) for (k, v) in composition_data)
         thermo_data = process_thermo_data(species_data["thermo"])
-        species_list[i] = Species(name, composition, thermo_data)
+        trans_data = process_transport_data(composition, species_data["transport"])
+            
+        species_list[i] = Species(name, composition, thermo_data, trans_data)
     end
 
     reaction_list = Vector{Reaction}(undef, length(mechanism_data["reactions"]))
@@ -204,6 +220,33 @@ function process_thermo_data(thermo_info::Dict)
     coeffs_low = NTuple{7, Float64}(Float64.(coeffs[1]))
     coeffs_high = NTuple{7, Float64}(Float64.(coeffs[2]))
     return ThermoData(T_low, T_mid, T_high, coeffs_low, coeffs_high)
+end
+
+function process_transport_data(comp_dict::Dict, transport_info::Dict)::TransData
+    
+    # 1. Extract Molar Mass (M)
+    # We need to calculate this from the composition
+    M = 0.0
+    for (element, count) in comp_dict
+        # Add the atomic mass * number of atoms
+        # You will need an atomic mass database for this.
+        # Here is a small subset for your common elements:
+        atomic_masses = Dict(
+            "N" => 14.0067,
+            "O" => 15.999,
+            "H" => 1.00794,
+            "C" => 12.0107,
+            "Ar" => 39.948
+        )
+        M += atomic_masses[element] * count
+    end
+    
+    # 2. Extract Transport parameters
+    d = transport_info["diameter"]    # Lennard-Jones diameter (Å)
+    eps = transport_info["well-depth"] # Lennard-Jones well-depth (K)
+    
+    # Create and return the TransData struct
+    return TransData(M, d, eps)
 end
 
 # Helper function to process reaction data (UPDATED)
@@ -491,13 +534,15 @@ end
 # NASA polynomials. It also includes the function `dT` to compute the rate of
 # change of temperature during the reaction process.
 #
+# Modified for change to constant volume
+#
 # Author: J.S. van der Heide
-# Date: 8-2-2025
+# Date: 20-8-2025
 ###############################################################################
 
-# Universal gas constant in cal/(mol·K)
-const R_joule = 8.314462
-const R_cal = 1.987204
+# Universal gas constant in 
+const R_joule = 8.314462 # J/(mol·K)
+const R_cal = 1.987204   # cal/(mol·K)
 
 # Units are weird: the activation energy is in cal/mol and the thermodynamics are in J/mol
 
@@ -618,8 +663,10 @@ end
 #
 # Modified later because of AD type compatibility needs
 #
+# Modified again for change to constant volume
+#
 # Author: J.S. van der Heide
-# Date: 11-7-2025
+# Date: 20-8-2025
 ###############################################################################
 
 # Function to compute reaction rates
@@ -659,28 +706,34 @@ Computes the reaction rates for all reactions given the current state.
 function compute_reaction_rates!(
     r::AbstractVector{<:Real},
     X::AbstractVector{<:Real},
-    kinetics_data::SplitKinetics, # Now accepts the new struct
+    kinetics_data::SplitKinetics,
     species_list::Vector{Species}
 )
     T = X[1]
     concentrations_m3 = @view X[2:end]
+    # Convert to /cm3 for Arrhenius equation
+    # Also use a zero-is-zero clamp to prevent negative concentrations (see thesis paper)
     concentrations_cm3 = concentrations_m3 * 1e-6
-
-    # --- Loop 1: Elementary Reactions (FULLY TYPE-STABLE) ---
-    # The compiler knows `k` is ALWAYS an ElementaryKinetics object in this loop.
+    
+    # Initialize all reaction rates to zero
+    fill!(r, 0.0)
+    
+    # --- Loop 1: Elementary Reactions ---
     for i in eachindex(kinetics_data.elementary_kinetics)
         k = kinetics_data.elementary_kinetics[i]
         original_idx = kinetics_data.elementary_indices[i]
+        
         r[original_idx] = calculate_q_dot(k, T, concentrations_cm3, species_list) * 1e6
     end
     
-    # --- Loop 2: Falloff Reactions (FULLY TYPE-STABLE) ---
-    # The compiler knows `k` is ALWAYS a FalloffKinetics object in this loop.
+    # --- Loop 2: Falloff Reactions ---
     for i in eachindex(kinetics_data.falloff_kinetics)
         k = kinetics_data.falloff_kinetics[i]
         original_idx = kinetics_data.falloff_indices[i]
+        
         r[original_idx] = calculate_q_dot(k, T, concentrations_cm3, species_list) * 1e6
     end
+    
     return nothing
 end
 
@@ -751,26 +804,26 @@ function calculate_q_dot(kinetics::ElementaryKinetics, T::Real, C::AbstractVecto
         k_f *= M
     end
 
-    # Reactant concentration product
-    C_reactants = 1.0
+    # Reactant concentrations in log space
+    C_reactants = 0
     for i in 1:length(kinetics.reactant_indices)
-        C_reactants *= C[kinetics.reactant_indices[i]] ^ kinetics.reactant_stoich[i]
+        C_reactants += log(C[kinetics.reactant_indices[i]]) * kinetics.reactant_stoich[i]
     end
     
-    r_fwd = k_f * C_reactants
+    r_fwd = k_f * exp(C_reactants)
     
     if kinetics.is_reversible
-        # Compute reverse rate
-        C_products = 1.0
+        # Compute reverse rate in log space
+        C_products = 0.0
         for i in 1:length(kinetics.product_indices)
-            C_products *= C[kinetics.product_indices[i]] ^ kinetics.product_stoich[i]
+            C_products += log(C[kinetics.product_indices[i]]) * kinetics.product_stoich[i]
         end
         
-        delta_G = compute_reaction_delta_G(T, kinetics, species)
+        delta_F = compute_reaction_delta_F(T, kinetics, species)
         # Avoid division by zero if k_f is tiny
-        K_c = exp(-delta_G / (R_joule * T))
+        K_c = exp(-delta_F / (R_joule * T))
         k_rev = k_f / K_c 
-        r_rev = k_rev * C_products
+        r_rev = k_rev * exp(C_products)
         return r_fwd - r_rev
     else
         return r_fwd
@@ -793,22 +846,28 @@ function calculate_q_dot(kinetics::FalloffKinetics, T::Real, C::AbstractVector{<
     k_f = k_inf * (1 / (1.0 + Pr)) * F
     
     # --- The rest is identical to the ElementaryKinetics method ---
-    C_reactants = 1.0
+    
+    # Reactant concentrations in log space
+    C_reactants = 0
     for i in 1:length(kinetics.reactant_indices)
-        C_reactants *= C[kinetics.reactant_indices[i]] ^ kinetics.reactant_stoich[i]
+        C_reactants += log(C[kinetics.reactant_indices[i]]) * kinetics.reactant_stoich[i]
     end
-    r_fwd = k_f * C_reactants
+    
+    r_fwd = k_f * exp(C_reactants)
     
     if kinetics.is_reversible
-        C_products = 1.0
+        # Compute reverse rate in log space
+        C_products = 0.0
         for i in 1:length(kinetics.product_indices)
-            C_products *= C[kinetics.product_indices[i]] ^ kinetics.product_stoich[i]
+            C_products += log(C[kinetics.product_indices[i]]) * kinetics.product_stoich[i]
         end
-
-        delta_G = compute_reaction_delta_G(T, kinetics, species)
-        K_c = exp(-delta_G / (R_joule * T))
-        k_rev = k_f / K_c
-        r_rev = k_rev * C_products
+        
+        delta_F = compute_reaction_delta_F(T, kinetics, species)
+        
+        K_c = exp(-delta_F / (R_joule * T))
+        
+        k_rev = k_f / K_c 
+        r_rev = k_rev * exp(C_products)
         return r_fwd - r_rev
     else
         return r_fwd
@@ -816,8 +875,8 @@ function calculate_q_dot(kinetics::FalloffKinetics, T::Real, C::AbstractVector{<
 end
 
 # --- Thermodynamics Calculation ---
-function compute_reaction_delta_G(T::Real, kinetics::AbstractKinetics, species_list::Vector{Species})
-    delta_H = 0.0
+function compute_reaction_delta_F(T::Real, kinetics::AbstractKinetics, species_list::Vector{Species})
+    delta_U = 0.0
     delta_S = 0.0
     
     # Reactants
@@ -825,7 +884,7 @@ function compute_reaction_delta_G(T::Real, kinetics::AbstractKinetics, species_l
         spec = species_list[kinetics.reactant_indices[i]]
         stoich = kinetics.reactant_stoich[i]        
         
-        delta_H -= stoich * h0(T, spec.thermo)
+        delta_U -= stoich * (h0(T, spec.thermo) - R_joule * T)
         delta_S -= stoich * species_entropy(T, spec.thermo)
     end
     
@@ -834,11 +893,64 @@ function compute_reaction_delta_G(T::Real, kinetics::AbstractKinetics, species_l
         spec = species_list[kinetics.product_indices[i]]
         stoich = kinetics.product_stoich[i]        
         
-        delta_H += stoich * h0(T, spec.thermo)
+        delta_U += stoich *(h0(T, spec.thermo) - R_joule * T)
         delta_S += stoich * species_entropy(T, spec.thermo)
     end
     
-    return delta_H - T * delta_S
+    return delta_U - T * delta_S
+end
+
+###############################################################################
+# Chemical Combustion Software - Diffusion and conduction coefficients
+#
+# Estimates for kappa and D that presume all of the gas is pure nitrogen,
+# Which is only 20% wrong...
+#
+# Author: J.S. van der Heide
+# Date: 19-8-2025
+###############################################################################
+
+const N2_prefactor = (6 / (3 * (3.707* 1e-10)^2)) * sqrt((1.380649e-23^3) / (3.141592^3 * 28.0134 / 6.02214076e26))
+
+function conductivity(T::Real)
+    return N2_prefactor * T^0.5
+end
+
+function diffusivity(transA::TransData, transB::TransData, T::Real, P::Real)::Real
+    # Combine parameters using Lorentz-Berthelot rules
+    σ_AB = (transA.d + transB.d) / 2.0           # Å
+    ϵ_AB = sqrt(transA.eps * transB.eps)         # K
+    M_AB = sqrt(1.0/transA.M + 1.0/transB.M)  # g/mol
+    
+    # Calculate reduced temperature
+    T_star = T / ϵ_AB
+    
+    # Get collision integral
+    Ω = collision_integral(T_star)
+
+    # Chapman-Enskog formula
+    D_AB = (1.859e-3 * M_AB * (T)^(3/2)) / ( P/101325 * σ_AB^2 * Ω)
+    
+    return D_AB
+end
+        
+function collision_integral(T_star::Real)::Real
+    # Constants for Neufeld et al. approximation
+    A = 1.06036
+    B = 0.15610
+    C = 0.19300
+    D_val = 0.47635
+    E = 1.03587
+    F_val = 1.52996
+    G = 1.76474
+    H_val = 3.89411
+    
+    Ω = A / (T_star)^B +
+        C / exp(D_val * T_star) +
+        E / exp(F_val * T_star) +
+        G / exp(H_val * T_star)
+    
+    return Ω
 end
 
 ###############################################################################
@@ -888,11 +1000,7 @@ function initialize_concentrations(
     # Define standard air composition percentages (by mole fraction)
     air_composition = Dict(
         "N2"   => 0.78084,
-        "O2"   => 0.20946,
-        "AR"   => 0.00934,
-        "CO2"  => 0.000412,
-        "H2O"  => 0.002,
-        "CO"   => 0.000002
+        "O2"   => 0.20946
         # Add more components if necessary
     )
 
@@ -933,6 +1041,7 @@ function initialize_concentrations(
 
     return concentrations
 end
+
 
 ###############################################################################
 # Chemical Combustion Software - Miscellaneous Functions
@@ -1001,6 +1110,15 @@ function initialise(config, YAML_name)
     return (initial_concentrations, (S, kinetics_tuples, species_list, reaction_list, species_index_map))
 end
 
+###############################################################################
+# Chemical Combustion Software - Verification functions
+#
+# This module defines functions that test if simulations are correct.
+#
+# Author: J.S. van der Heide
+# Date: 20-8-2025
+###############################################################################
+
 
 # A function to check what the amount of atoms of a given concentration vector is
 function atom_counter(X0, YAML_name, species_index_map)
@@ -1037,4 +1155,66 @@ function atom_counter(X0, YAML_name, species_index_map)
     @info "The amount of hydrogen atoms is $(H) mol"
     @info "The amount of oxygen atoms is $(O) mol"
     @info "The amount of carbon atoms is $(C) mol"
+end
+
+function energy_accounting(sol, species_list, species_index_map)
+
+    # Define species categories
+    fuel_species = ["CH4", "C2H6", "C3H8", "H2"]
+    product_species = ["CO2", "H2O", "CO"]
+    dissociation_species = setdiff(
+        [species.name for species in species_list],
+        union(fuel_species, product_species, ["N2", "AR"])  # Exclude inerts
+    )
+
+    # Get time points and solution data
+    t = sol.t  # Time points
+    n_times = length(t)
+    n_species = length(species_list)
+    X = sol.u  # Solution array: [T; concentrations]
+    R_joule = 8.31446261815324  # Gas constant (J/(mol·K))
+
+    # Initialize energy arrays (J/m³)
+    fuel_energy = zeros(n_times)
+    dissociation_energy = zeros(n_times)
+    product_energy = zeros(n_times)
+    heat_energy = zeros(n_times)
+
+    # Compute energy for each time point
+    for i in 1:n_times
+        T = X[i][1]  # Temperature (K)
+        concentrations = X[i][2:end]  # Species concentrations (mol/m³)
+
+        # Compute species enthalpies and heat capacities
+        u_species = zeros(n_species)  # Enthalpy (J/mol)
+        cv_vec = zeros(n_species)     # Heat capacity at constant volume (J/(mol·K))
+        for (species_index, species) in enumerate(species_list)
+            cv_vec[species_index] = species_cp(T, species.thermo) - R_joule
+            u_species[species_index] = h0(T, species.thermo) - R_joule * T
+        end
+
+        # Compute total heat capacity (J/(m³·K))
+        c_v = sum(concentrations .* cv_vec)
+
+        # Compute heat energy (J/m³)
+        heat_energy[i] = c_v * T
+
+        # Sum enthalpy (J/mol * mol/m³ = J/m³) for each category
+        for name in [species.name for species in species_list]
+            if name in fuel_species
+                idx = species_index_map[name]
+                fuel_energy[i] += u_species[idx] * concentrations[idx]
+            end
+            if name in dissociation_species
+                idx = species_index_map[name]
+                dissociation_energy[i] += u_species[idx] * concentrations[idx]
+            end
+            if name in product_species
+                idx = species_index_map[name]
+                product_energy[i] += u_species[idx] * concentrations[idx]
+            end
+        end
+    end
+
+    return t, fuel_energy, dissociation_energy, product_energy, heat_energy
 end
